@@ -1,5 +1,4 @@
-#![feature(if_let_guard)]
-
+mod layout;
 mod lexer;
 
 pub fn render_as_html(tex: &str, display: bool) -> String {

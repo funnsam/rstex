@@ -9,14 +9,14 @@ pub enum Token {
     BeginGroup,
     EndGroup,
     MathShift,
-    Align,
+    AlignTab,
     Eol,
-    MacroParam,
+    Parameter,
     Superscript,
     Subscript,
-    Ignore,
+    Ignored,
     Space,
-    Letters,
+    Letter,
     Other,
     Active,
     Comment,
@@ -27,7 +27,6 @@ pub struct Lexer<'a> {
     pub stream: &'a str,
     range: Range,
     pub catcodes: HashMap<char, Token>,
-    was_escape: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -36,7 +35,6 @@ impl<'a> Lexer<'a> {
             stream,
             range: 0..0,
             catcodes: HashMap::new(),
-            was_escape: false,
         }
     }
 
@@ -59,38 +57,27 @@ impl Iterator for Lexer<'_> {
     type Item = Token;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let was_escape = core::mem::take(&mut self.was_escape);
         self.range.start = self.range.end;
 
         Some(match self.next_char()? {
-            c if let Some(t) = self.catcodes.get(&c) => t.clone(),
+            // c if let Some(t) = self.catcodes.get(&c) => t.clone(),
+            c if self.catcodes.contains_key(&c) => self.catcodes[&c].clone(),
 
-            '\\' => { self.was_escape = true; Token::Escape },
+            '\\' => Token::Escape,
             '{' => Token::BeginGroup,
             '}' => Token::EndGroup,
             '$' => Token::MathShift,
-            '&' => Token::Align,
+            '&' => Token::AlignTab,
             '\n' => Token::Eol,
-            '#' => Token::MacroParam,
+            '#' => Token::Parameter,
             '^' => Token::Superscript,
             '_' => Token::Subscript,
-            '\0' => Token::Ignore,
-            ' ' => Token::Space,
+            '\0' | '\r' => Token::Ignored,
+            ' ' | '\t' => Token::Space,
+            c if c.is_ascii_alphabetic() => Token::Letter,
             '~' => Token::Active,
             '%' => Token::Comment,
             '\x7f' => Token::Invalid,
-            c if was_escape && c.is_ascii_alphabetic() => {
-                while let Some(c) = self.peek_char() {
-                    if c.is_ascii_alphabetic() || matches!(self.catcodes.get(&c), Some(Token::Letters)) {
-                        self.range.end += 1;
-                    } else {
-                        break;
-                    }
-                }
-
-                Token::Letters
-            },
-            c if c.is_ascii_alphabetic() => Token::Letters,
             _ => Token::Other,
         })
     }
