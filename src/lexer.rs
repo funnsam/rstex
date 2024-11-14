@@ -12,7 +12,7 @@ pub struct Token<'a> {
     pub source: CowStr<'a>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TokenType {
     /// This is a command if it happends to exist in the token stream
@@ -65,22 +65,8 @@ impl<'a> Lexer<'a> {
         self.range.clone()
     }
 
-    fn peek_type(&mut self) -> (Option<(TokenType, CowStr<'a>)>, usize) {
-        let end = self.range.end;
-        let typ = self.next_type();
-        let diff = self.range.end - end;
-        self.range.end = end;
-        (typ, diff)
-    }
-
-    // NOTE: it only changes the end of range
-    fn next_type(&mut self) -> Option<(TokenType, CowStr<'a>)> {
-        let chr = self.next_char()?;
-        self._next_type(chr, self.range.end - 1)
-    }
-
-    fn _next_type(&mut self, chr: char, start: usize) -> Option<(TokenType, CowStr<'a>)> {
-        let typ = match chr {
+    fn catcode_of(&self, chr: char) -> TokenType {
+        match chr {
             // c if let Some(t) = self.catcodes.get(&c) => t.clone(),
             c if self.catcodes.contains_key(&c) => self.catcodes[&c].clone(),
 
@@ -91,9 +77,55 @@ impl<'a> Lexer<'a> {
             '&' => TokenType::AlignTab,
             '\n' => TokenType::Eol,
             '#' => TokenType::Parameter,
-            '^' => {
-                if matches!(self.peek_char(), Some('^')) {
-                    self.range.end += '^'.len_utf8();
+            '^' => TokenType::Superscript,
+            '_' => TokenType::Subscript,
+            '\0' | '\r' => TokenType::Ignored,
+            ' ' | '\t' => TokenType::Space,
+            c if c.is_ascii_alphabetic() => TokenType::Letter,
+            '~' => TokenType::Active,
+            '%' => TokenType::Comment,
+            '\x7f' => TokenType::Invalid,
+            _ => TokenType::Other,
+        }
+    }
+
+    fn peek_type(&mut self, s_state: bool) -> (Option<(TokenType, CowStr<'a>)>, usize) {
+        let end = self.range.end;
+        let typ = self.next_type(s_state);
+        let diff = self.range.end - end;
+        self.range.end = end;
+        (typ, diff)
+    }
+
+    // NOTE: it only changes the end of range
+    fn next_type(&mut self, s_state: bool) -> Option<(TokenType, CowStr<'a>)> {
+        let chr = self.next_char()?;
+        self._next_type(chr, s_state, self.range.end - 1)
+    }
+
+    fn _next_type(&mut self, chr: char, s_state: bool, start: usize) -> Option<(TokenType, CowStr<'a>)> {
+        let typ = self.catcode_of(chr);
+
+        match typ {
+            TokenType::Ignored => return self.next_type(s_state),
+            TokenType::Space | TokenType::Eol if s_state => return self.next_type(s_state),
+            TokenType::Space => {
+                while let Some(c) = self.peek_char() {
+                    match self.catcode_of(c) {
+                        TokenType::Space => {
+                            self.range.end += c.len_utf8();
+                        },
+                        TokenType::Eol => {
+                            self.range.end += c.len_utf8();
+                            return self.next_type(s_state);
+                        },
+                        _ => break,
+                    }
+                }
+            },
+            TokenType::Superscript => {
+                if self.peek_char() == Some(chr) {
+                    self.range.end += chr.len_utf8();
                     let next = self.next_char()?;
                     let chr = match next {
                         '0'..='9' | 'a'..='f' => {
@@ -105,10 +137,10 @@ impl<'a> Lexer<'a> {
                                 let digits = unsafe{ core::str::from_utf8_unchecked(&digits) };
                                 digits.parse::<u8>().unwrap() as char
                             } else {
-                                (next as u32 - b'@' as u32).try_into().unwrap()
+                                (next as u8).wrapping_sub(b'@') as _
                             }
                         },
-                        _ => (next as u32 - b'@' as u32).try_into().unwrap(),
+                        _ => (next as u8).wrapping_sub(b'@') as _
                     };
 
                     if let Some(s) = self.chars.as_mut() {
@@ -117,30 +149,11 @@ impl<'a> Lexer<'a> {
                         self.chars = Some(format!("{}{chr}", &self.stream[self.range.start..start].to_string()));
                     }
 
-                    return self._next_type(chr, self.range.end).map(|(t, _)| (t, self.chars.as_ref().cloned().unwrap().into()));
+                    return self._next_type(chr, false, self.range.end).map(|(t, _)| (t, self.chars.as_ref().cloned().unwrap().into()));
                 }
-
-                TokenType::Superscript
             },
-            '_' => TokenType::Subscript,
-            '\0' | '\r' => TokenType::Ignored,
-            ' ' | '\t' => {
-                while let Some(c) = self.peek_char() {
-                    if matches!(c, ' ' | '\t') || matches!(self.catcodes.get(&c), Some(TokenType::Space)) {
-                        self.range.end += c.len_utf8();
-                    } else {
-                        break;
-                    }
-                }
-
-                TokenType::Space
-            },
-            c if c.is_ascii_alphabetic() || c == '\x01' => TokenType::Letter,
-            '~' => TokenType::Active,
-            '%' => TokenType::Comment,
-            '\x7f' => TokenType::Invalid,
-            _ => TokenType::Other,
-        };
+            _ => {}
+        }
 
         if let Some(s) = self.chars.as_mut() {
             *s += &self.stream[start..self.range.end];
@@ -158,26 +171,38 @@ impl<'a> Iterator for Lexer<'a> {
         self.range.start = self.range.end;
         self.chars = None;
 
-        self.next_type().and_then(|t| match t.0 {
+        self.next_type(false).and_then(|t| match t.0 {
             TokenType::Comment => {
-                while !matches!(self.next_type(), Some((TokenType::Eol, _)) | None) {}
+                while !matches!(self.next_type(false), Some((TokenType::Eol, _)) | None) {}
                 self.next()
             },
             TokenType::Escape => {
                 let mut end = self.range.end;
-                let next = self.next_type()?;
+                let next = self.next_type(false)?;
                 let mut source = next.1;
 
                 if matches!(next.0, TokenType::Letter) {
-                    while let (Some((typ, src)), add) = self.peek_type() {
-                        match typ {
-                            TokenType::Letter => {
-                                self.range.end += add;
-                                end = self.range.end;
-                                source = src;
-                            },
-                            TokenType::Space | TokenType::Eol => { self.range.end += add; break; }
-                            _ => break,
+                    loop {
+                        if let Some(c) = self.peek_char() {
+                            if matches!(self.catcode_of(c), TokenType::Space | TokenType::Eol) {
+                                self.next_type(true);
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+
+                        if let (Some((typ, src)), add) = self.peek_type(true) {
+                            match typ {
+                                TokenType::Letter => {
+                                    self.range.end += add;
+                                    end = self.range.end;
+                                    source = src;
+                                },
+                                _ => break,
+                            }
+                        } else {
+                            break;
                         }
                     }
                 } else {
