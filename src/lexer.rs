@@ -15,7 +15,7 @@ pub struct Token<'a> {
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum TokenType {
-    /// A command if it happends to exist in the token stream
+    /// This is a command if it happends to exist in the token stream
     Escape,
     BeginGroup,
     EndGroup,
@@ -94,7 +94,22 @@ impl<'a> Lexer<'a> {
             '^' => {
                 if matches!(self.peek_char(), Some('^')) {
                     self.range.end += '^'.len_utf8();
-                    let chr = (self.next_char()? as u32 - b'@' as u32).try_into().unwrap();
+                    let next = self.next_char()?;
+                    let chr = match next {
+                        '0'..='9' | 'a'..='f' => {
+                            let d = self.peek_char();
+                            if matches!(d, Some('0'..='9' | 'a'..='f')) {
+                                self.range.end += 1;
+
+                                let digits = [next as u8, d.unwrap() as u8];
+                                let digits = unsafe{ core::str::from_utf8_unchecked(&digits) };
+                                digits.parse::<u8>().unwrap() as char
+                            } else {
+                                (next as u32 - b'@' as u32).try_into().unwrap()
+                            }
+                        },
+                        _ => (next as u32 - b'@' as u32).try_into().unwrap(),
+                    };
 
                     if let Some(s) = self.chars.as_mut() {
                         s.push(chr);
