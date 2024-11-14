@@ -39,6 +39,7 @@ pub struct Lexer<'a> {
     range: Range,
     pub catcodes: HashMap<char, TokenType>,
     chars: Option<String>,
+    state: State,
 }
 
 impl<'a> Lexer<'a> {
@@ -48,6 +49,7 @@ impl<'a> Lexer<'a> {
             range: 0..0,
             catcodes: HashMap::new(),
             chars: None,
+            state: State::N
         }
     }
 
@@ -89,79 +91,68 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn peek_type(&mut self, s_state: bool) -> (Option<(TokenType, CowStr<'a>)>, usize) {
-        let end = self.range.end;
-        let typ = self.next_type(s_state);
-        let diff = self.range.end - end;
-        self.range.end = end;
-        (typ, diff)
-    }
-
-    // NOTE: it only changes the end of range
-    fn next_type(&mut self, s_state: bool) -> Option<(TokenType, CowStr<'a>)> {
-        let chr = self.next_char()?;
-        self._next_type(chr, s_state, self.range.end - 1)
-    }
-
-    fn _next_type(&mut self, chr: char, s_state: bool, start: usize) -> Option<(TokenType, CowStr<'a>)> {
-        let typ = self.catcode_of(chr);
-
+    fn _next(&mut self, c: char) -> Option<Token<'a>> {
+        let typ = self.catcode_of(c);
         match typ {
-            TokenType::Ignored => return self.next_type(s_state),
-            TokenType::Space | TokenType::Eol if s_state => return self.next_type(s_state),
+            TokenType::Escape => {
+            },
+            TokenType::Superscript if self.peek_char() == Some(c)       // followed by identical character
+                && self.next_char().is_some()                           // placeholder to skip 1 char
+                && self.peek_char().map_or(false, |c| (c as u32) < 128)   // c < 128
+            => {
+                let next = self.next_char().unwrap();
+                let c = match next {
+                    '0'..='9' | 'a'..='f' if self.peek_char().map_or(false, |c| matches!(c, '0'..='9' | 'a'..='f')) => {
+                        let hex = [next as u8, self.next_char().unwrap() as u8];
+                        unsafe { core::str::from_utf8_unchecked(&hex) }.parse::<u8>().unwrap() as char
+                    }
+                    _ => {
+                        (next as u8).wrapping_sub(64) as char
+                    },
+                };
+                self._next(c)
+            },
+            TokenType::BeginGroup |
+            TokenType::EndGroup |
+            TokenType::MathShift |
+            TokenType::AlignTab |
+            TokenType::Parameter |
+            TokenType::Superscript |
+            TokenType::Subscript |
+            TokenType::Letter |
+            TokenType::Other |
+            TokenType::Active => {
+                self.state = State::M;
+                Some(Token { typ, range: self.range(), source: "".into() })
+            },
+            TokenType::Eol => {
+                match self.state {
+                    State::N => Some(Token { typ: TokenType::Escape, range: self.range(), source: "par".into() }),
+                    State::M => Some(Token { typ: TokenType::Space, range: self.range(), source: " ".into() }),
+                    State::S => self.next(),
+                }
+            },
+            TokenType::Ignored => self.next(),
             TokenType::Space => {
-                while let Some(c) = self.peek_char() {
-                    match self.catcode_of(c) {
-                        TokenType::Space => {
-                            self.range.end += c.len_utf8();
-                        },
-                        TokenType::Eol => {
-                            self.range.end += c.len_utf8();
-                            return self.next_type(s_state);
-                        },
-                        _ => break,
-                    }
+                match self.state {
+                    State::N | State::S => self.next(),
+                    State::M => {
+                        self.state = State::S;
+                        Some(Token { typ: TokenType::Space, range: self.range(), source: " ".into() })
+                    },
                 }
             },
-            TokenType::Superscript => {
-                if self.peek_char() == Some(chr) {
-                    self.range.end += chr.len_utf8();
-                    let next = self.next_char()?;
-                    let chr = match next {
-                        '0'..='9' | 'a'..='f' => {
-                            let d = self.peek_char();
-                            if matches!(d, Some('0'..='9' | 'a'..='f')) {
-                                self.range.end += 1;
-
-                                let digits = [next as u8, d.unwrap() as u8];
-                                let digits = unsafe{ core::str::from_utf8_unchecked(&digits) };
-                                digits.parse::<u8>().unwrap() as char
-                            } else {
-                                (next as u8).wrapping_sub(b'@') as _
-                            }
-                        },
-                        _ => (next as u8).wrapping_sub(b'@') as _
-                    };
-
-                    if let Some(s) = self.chars.as_mut() {
-                        s.push(chr);
-                    } else {
-                        self.chars = Some(format!("{}{chr}", &self.stream[self.range.start..start].to_string()));
-                    }
-
-                    return self._next_type(chr, false, self.range.end).map(|(t, _)| (t, self.chars.as_ref().cloned().unwrap().into()));
-                }
+            TokenType::Comment => {
             },
-            _ => {}
-        }
-
-        if let Some(s) = self.chars.as_mut() {
-            *s += &self.stream[start..self.range.end];
-            Some((typ, s.clone().into()))
-        } else {
-            Some((typ, self.stream[self.range()].into()))
+            TokenType::Invalid => {
+            },
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+    N, M, S
 }
 
 impl<'a> Iterator for Lexer<'a> {
@@ -169,59 +160,11 @@ impl<'a> Iterator for Lexer<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.start = self.range.end;
-        self.chars = None;
 
-        self.next_type(false).and_then(|t| match t.0 {
-            TokenType::Comment => {
-                while !matches!(self.next_type(false), Some((TokenType::Eol, _)) | None) {}
-                self.next()
-            },
-            TokenType::Escape => {
-                let mut end = self.range.end;
-                let next = self.next_type(false)?;
-                let mut source = next.1;
-
-                if matches!(next.0, TokenType::Letter) {
-                    loop {
-                        if let Some(c) = self.peek_char() {
-                            if matches!(self.catcode_of(c), TokenType::Space | TokenType::Eol) {
-                                self.next_type(true);
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-
-                        if let (Some((typ, src)), add) = self.peek_type(true) {
-                            match typ {
-                                TokenType::Letter => {
-                                    self.range.end += add;
-                                    end = self.range.end;
-                                    source = src;
-                                },
-                                _ => break,
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                } else {
-                    end = self.range.end;
-                }
-
-                Some(Token {
-                    typ: TokenType::Escape,
-                    range: self.range.start..end,
-                    source,
-                })
-            },
-            TokenType::Ignored => self.next(),
-            TokenType::Invalid => todo!("reached invalid char"),
-            typ => Some(Token {
-                typ,
-                range: self.range(),
-                source: t.1,
-            }),
-        })
+        if let Some(c) = self.next_char() {
+            self._next(c)
+        } else {
+            None
+        }
     }
 }

@@ -4,6 +4,6 @@ fn main() {
 \mat{1 & 2 \\ 3 & 4}"));
     eprintln!("{}", rstex::render_as_html(r"$E   =   mc^2$"));
 
-    eprintln!("{}", rstex::render_as_html(r"\TeX
-  is  cool  "));
+    eprintln!("{}", rstex::render_as_html(r"\TeX  is
+  cool  \TeX ^^`^^` abc  ^^`^^` "));
 }
