@@ -35,20 +35,23 @@ pub enum TokenType {
 }
 
 pub struct Lexer<'a> {
-    pub stream: &'a str,
-    range: Range,
+    pub stream: core::str::Lines<'a>,
     pub catcodes: HashMap<char, TokenType>,
-    chars: Option<String>,
+    range: Range,
     state: State,
 }
 
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+    #[default] N, M, S
+}
+
 impl<'a> Lexer<'a> {
-    pub fn new(stream: &'a str) -> Self {
+    pub fn new(stream: core::str::Lines<'a>) -> Self {
         Self {
             stream,
-            range: 0..0,
             catcodes: HashMap::new(),
-            chars: None,
+            range: 0..0,
             state: State::N
         }
     }
@@ -91,26 +94,76 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    fn peek_next(&mut self) -> (Option<Token<'a>>, usize) {
+        let end = self.range.end;
+        let typ = self.next();
+        let diff = self.range.end - end;
+        self.range.end = end;
+        (typ, diff)
+    }
+
     fn _next(&mut self, c: char) -> Option<Token<'a>> {
         let typ = self.catcode_of(c);
         match typ {
             TokenType::Escape => {
+                match self.peek_char().map(|c| (c, self.catcode_of(c))) {
+                    Some((_, TokenType::Eol)) | None => {
+                        self.state = State::M;
+                        Some(Token { typ: TokenType::Escape, range: self.range(), source: "".into() })
+                    },
+                    Some((_, TokenType::Letter)) => {
+                        self.state = State::S;
+                        let start = self.range.end;
+                        let mut source = String::new();
+
+                        loop {
+                            let (next, diff) = self.peek_next();
+
+                            if let Some(Token { typ: TokenType::Letter, source: src, .. }) = next {
+                                source += &src;
+                                self.range.end += diff;
+                            } else {
+                                break;
+                            }
+                        }
+
+                        Some(Token {
+                            typ: TokenType::Escape,
+                            range: self.range(),
+                            source: source.into(),
+                        })
+                    },
+                    Some((c, _)) => {
+                        self.state = State::M;
+                        self.range.end += c.len_utf8();
+                        Some(Token {
+                            typ: TokenType::Escape,
+                            range: self.range(),
+                            source: self.stream[self.range.end - c.len_utf8()..self.range.end].into(),
+                        })
+                    },
+                }
             },
             TokenType::Superscript if self.peek_char() == Some(c)       // followed by identical character
                 && self.next_char().is_some()                           // placeholder to skip 1 char
-                && self.peek_char().map_or(false, |c| (c as u32) < 128)   // c < 128
+                && self.peek_char().map_or(false, |c| (c as u32) < 128) // c < 128
             => {
                 let next = self.next_char().unwrap();
                 let c = match next {
                     '0'..='9' | 'a'..='f' if self.peek_char().map_or(false, |c| matches!(c, '0'..='9' | 'a'..='f')) => {
                         let hex = [next as u8, self.next_char().unwrap() as u8];
-                        unsafe { core::str::from_utf8_unchecked(&hex) }.parse::<u8>().unwrap() as char
+                        u8::from_str_radix(unsafe { core::str::from_utf8_unchecked(&hex) }, 16).unwrap() as char
                     }
                     _ => {
                         (next as u8).wrapping_sub(64) as char
                     },
                 };
-                self._next(c)
+                let range = self.range();
+                let mut next = self._next(c)?;
+                if next.source == &self.stream[range] {
+                    next.source = c.to_string().into();
+                }
+                Some(next)
             },
             TokenType::BeginGroup |
             TokenType::EndGroup |
@@ -123,10 +176,10 @@ impl<'a> Lexer<'a> {
             TokenType::Other |
             TokenType::Active => {
                 self.state = State::M;
-                Some(Token { typ, range: self.range(), source: "".into() })
+                Some(Token { typ, range: self.range(), source: self.stream[self.range()].into() })
             },
             TokenType::Eol => {
-                match self.state {
+                match core::mem::take(&mut self.state) {
                     State::N => Some(Token { typ: TokenType::Escape, range: self.range(), source: "par".into() }),
                     State::M => Some(Token { typ: TokenType::Space, range: self.range(), source: " ".into() }),
                     State::S => self.next(),
@@ -143,16 +196,15 @@ impl<'a> Lexer<'a> {
                 }
             },
             TokenType::Comment => {
+                while self.next_char().map_or(false, |c| self.catcode_of(c) != TokenType::Eol) {}
+                self.next()
             },
             TokenType::Invalid => {
+                println!("! encountered invalid character");
+                self.next()
             },
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
-    N, M, S
 }
 
 impl<'a> Iterator for Lexer<'a> {

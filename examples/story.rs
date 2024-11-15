@@ -17,5 +17,6 @@ typesetting beautiful documents.
 \vskip 1in
 \hrule
 \vfill\eject
+\b^^61ch
 "#));
 }
