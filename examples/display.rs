@@ -5,5 +5,7 @@ fn main() {
     eprintln!("{}", rstex::render_as_html(r"$E   =   mc^2$"));
 
     eprintln!("{}", rstex::render_as_html(r"\TeX  is
-  cool  \TeX ^^`^^` abc  ^^`^^` "));
+  cool  \TeX ^^`^^` abc  ^^`^^` ab
+
+a"));
 }
